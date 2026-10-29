@@ -1,0 +1,31 @@
+# Android / Gradle
+.gradle/
+**/build/
+hs_err_pid*.log
+replay_pid*.log
+local.properties
+.tools/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Signing material and local secrets
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+.env
+.env.*
+!.env.example
+
+# User captures and temporary artifacts
+captures/
+*.capture
+*.tmp
+*.temp
+
+# Re-include project instructions and documentation hidden by global ignore
+!/AGENTS.md
+!/docs/
+!/docs/**
