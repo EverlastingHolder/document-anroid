@@ -28,7 +28,7 @@ class PassportExporterTest {
 
             SevenZFile(archive, "123".toCharArray()).use { input ->
                 val entry = input.nextEntry
-                assertEquals("passport.txt", entry.name)
+                assertEquals("document.txt", entry.name)
                 val bytes = readEntry(input)
                 val exportedText = String(bytes, StandardCharsets.UTF_8)
                 assertEquals(PassportTextSerializer.serialize(snapshot), exportedText)
@@ -50,15 +50,40 @@ class PassportExporterTest {
     }
 
     @Test
-    fun serializerWritesAllElevenRussianLabelsInStableOrder() {
+    fun serializerWritesAllElevenRussianLabelsInStableOrderAndLocalizesGender() {
         val snapshot = fixture("value")
         val lines = PassportTextSerializer.serialize(snapshot).trimEnd().lines()
 
         assertEquals(11, lines.size)
+        assertEquals("Пол: МУЖ.", lines[3])
         assertEquals(
-            PassportField.entries.map { field -> "${field.label}: ${snapshot.values.getValue(field)}" },
+            PassportField.entries.map { field ->
+                val value = if (field == PassportField.GENDER) "МУЖ." else snapshot.values.getValue(field)
+                "${field.label}: $value"
+            },
             lines,
         )
+    }
+
+    @Test
+    fun encryptedTextEntryExportsFemaleLabelWhileSnapshotKeepsCanonicalCode() {
+        val cacheDir = Files.createTempDirectory("passport-female-export-test").toFile()
+        val snapshot = fixture("value").let { base ->
+            PassportSnapshot(base.values + (PassportField.GENDER to "F"), base.revision)
+        }
+
+        try {
+            val archive = kotlinx.coroutines.runBlocking { PassportExporter(cacheDir).createArchive(snapshot) }
+            SevenZFile(archive, "123".toCharArray()).use { input ->
+                assertEquals("document.txt", input.nextEntry.name)
+                val text = String(readEntry(input), StandardCharsets.UTF_8)
+                assertTrue(text.contains("Пол: ЖЕН.\n"))
+                assertFalse(text.contains("Пол: F\n"))
+            }
+            assertEquals("F", snapshot.values.getValue(PassportField.GENDER))
+        } finally {
+            cacheDir.deleteRecursively()
+        }
     }
 
     @Test
@@ -103,7 +128,7 @@ class PassportExporterTest {
             expectedTextFile.writeText(EXPECTED_PROOF_TEXT, StandardCharsets.UTF_8)
 
             SevenZFile(proofArchive, "123".toCharArray()).use { input ->
-                assertEquals("passport.txt", input.nextEntry.name)
+                assertEquals("document.txt", input.nextEntry.name)
                 assertEquals(EXPECTED_PROOF_TEXT, String(readEntry(input), StandardCharsets.UTF_8))
                 assertEquals(null, input.nextEntry)
             }
@@ -163,7 +188,7 @@ class PassportExporterTest {
             "Фамилия: СИНТЕТИЧЕСКИЙ\n" +
                 "Имя: ПРИМЕР\n" +
                 "Отчество: \n" +
-                "Пол: F\n" +
+            "Пол: ЖЕН.\n" +
                 "Дата рождения: 1999-12-31\n" +
                 "Место рождения: ГОРОД ОБРАЗЕЦ\n" +
                 "Серия: 0042\n" +

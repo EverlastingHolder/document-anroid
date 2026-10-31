@@ -81,7 +81,7 @@ class PassportEmailTest {
             try {
                 sharedArchive.outputStream().use { output -> stream!!.copyTo(output) }
                 SevenZFile(sharedArchive, "123".toCharArray()).use { input ->
-                    assertEquals("passport.txt", input.nextEntry.name)
+                    assertEquals("document.txt", input.nextEntry.name)
                     assertTrue(String(readEntry(input), StandardCharsets.UTF_8).contains("Фамилия: ТЕСТОВ"))
                 }
             } finally {

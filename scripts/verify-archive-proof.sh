@@ -22,11 +22,11 @@ trap 'rm -rf -- "${temp_dir}"' EXIT
 
 "${seven_zip}" t -p123 "${archive}"
 "${seven_zip}" x -p123 -y "-o${temp_dir}" "${archive}"
-if [[ ! -f "${temp_dir}/passport.txt" ]]; then
-    printf 'Archive must contain passport.txt.\n' >&2
+if [[ ! -f "${temp_dir}/document.txt" ]]; then
+    printf 'Archive must contain document.txt.\n' >&2
     exit 1
 fi
-cmp "${expected}" "${temp_dir}/passport.txt"
+cmp "${expected}" "${temp_dir}/document.txt"
 
 "${seven_zip}" l -slt -p123 "${archive}" > "${temp_dir}/listing.txt"
 if ! awk -v archive_path="${archive}" '
@@ -35,19 +35,19 @@ if ! awk -v archive_path="${archive}" '
         if (path != archive_path) {
             entry_count++
             entry_name = path
-            if (path != "passport.txt") {
+            if (path != "document.txt") {
                 unexpected_entry = 1
             }
         }
     }
-    /^Encrypted = \+$/ && entry_name == "passport.txt" {
+    /^Encrypted = \+$/ && entry_name == "document.txt" {
         encrypted = 1
     }
     END {
         exit !(entry_count == 1 && !unexpected_entry && encrypted)
     }
 ' "${temp_dir}/listing.txt"; then
-    printf 'Archive must contain only an encrypted passport.txt entry.\n' >&2
+    printf 'Archive must contain only an encrypted document.txt entry.\n' >&2
     exit 1
 fi
 
@@ -56,4 +56,4 @@ if "${seven_zip}" t -pwrong "${archive}" > "${temp_dir}/wrong-password.txt" 2>&1
     exit 1
 fi
 
-printf 'Archive proof passed: encrypted passport.txt matches the expected fixture; wrong password was rejected.\n'
+printf 'Archive proof passed: encrypted document.txt matches the expected fixture; wrong password was rejected.\n'

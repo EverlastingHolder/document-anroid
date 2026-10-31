@@ -54,10 +54,10 @@ object PassportEmail {
             this.component = component
             type = ARCHIVE_MIME_TYPE
             putExtra(Intent.EXTRA_EMAIL, arrayOf(RECIPIENT))
-            putExtra(Intent.EXTRA_SUBJECT, "Паспортные данные")
+            putExtra(Intent.EXTRA_SUBJECT, "Данные документа")
             putExtra(Intent.EXTRA_TEXT, "Во вложении архив с подтверждёнными данными.")
             putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newUri(context.contentResolver, "Архив паспорта", uri)
+            clipData = ClipData.newUri(context.contentResolver, "Архив документа", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -69,7 +69,7 @@ object PassportEmail {
             compatibleSendTargets.drop(1).map(::targetedSendIntent).toTypedArray(),
         )
         // Keep the read grant on the chooser as well as its explicit target intents.
-        chooser.clipData = ClipData.newUri(context.contentResolver, "Архив паспорта", uri)
+        chooser.clipData = ClipData.newUri(context.contentResolver, "Архив документа", uri)
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         return chooser
     }

@@ -76,8 +76,8 @@ class PassportExporter(private val cacheDir: File) {
     private companion object {
         const val EXPORT_DIRECTORY = "exports"
         const val SESSION_PREFIX = "passport-export-"
-        const val ARCHIVE_NAME = "passport.7z"
-        const val TEXT_ENTRY_NAME = "passport.txt"
+        const val ARCHIVE_NAME = "document.7z"
+        const val TEXT_ENTRY_NAME = "document.txt"
         const val ARCHIVE_PASSWORD = "123"
         // Keep email attachments in the app cache for 24 hours before best-effort cleanup.
         const val RETENTION_MILLIS = 24L * 60 * 60 * 1000
@@ -90,7 +90,16 @@ internal object PassportTextSerializer {
         PassportField.entries.forEach { field ->
             append(field.label)
             append(": ")
-            append(snapshot.values.getValue(field))
+            append(
+                when (field) {
+                    PassportField.GENDER -> when (snapshot.values.getValue(field)) {
+                        "M" -> "МУЖ."
+                        "F" -> "ЖЕН."
+                        else -> snapshot.values.getValue(field)
+                    }
+                    else -> snapshot.values.getValue(field)
+                },
+            )
             append('\n')
         }
     }
