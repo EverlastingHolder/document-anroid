@@ -80,6 +80,11 @@ class ScanViewModel(
         val generation = ++operationGeneration
         val revisionAtRequest = mutableState.value.editRevision
         val requestId = UUID.randomUUID().toString()
+        fun canApplyRecognitionResult(current: ScanUiState): Boolean =
+            generation == operationGeneration &&
+                current.image?.id == image.id &&
+                current.editRevision == revisionAtRequest
+
         mutableState.value = mutableState.value.copy(
             isRecognizing = true,
             isExporting = false,
@@ -93,14 +98,14 @@ class ScanViewModel(
             try {
                 val draft = repository.recognize(image, requestId)
                 val current = mutableState.value
-                if (generation == operationGeneration && current.image?.id == image.id && current.editRevision == revisionAtRequest) {
+                if (canApplyRecognitionResult(current)) {
                     mutableState.value = current.copy(isRecognizing = false, draft = draft)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: PassportRepositoryException) {
                 val current = mutableState.value
-                if (generation == operationGeneration && current.image?.id == image.id && current.editRevision == revisionAtRequest) {
+                if (canApplyRecognitionResult(current)) {
                     mutableState.value = current.copy(
                         isRecognizing = false,
                         error = failure.message ?: "Не удалось распознать изображение.",
@@ -108,7 +113,7 @@ class ScanViewModel(
                 }
             } catch (_: Exception) {
                 val current = mutableState.value
-                if (generation == operationGeneration && current.image?.id == image.id && current.editRevision == revisionAtRequest) {
+                if (canApplyRecognitionResult(current)) {
                     mutableState.value = current.copy(
                         isRecognizing = false,
                         error = "Не удалось распознать изображение. Проверьте соединение и повторите запрос.",

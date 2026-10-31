@@ -1,6 +1,7 @@
 package ru.passport.scanner.presentation
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -18,6 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import ru.passport.scanner.data.PassportRepository
+import ru.passport.scanner.data.PassportRepositoryException
 import ru.passport.scanner.model.PassportSnapshot
 import ru.passport.scanner.model.PassportDraft
 import ru.passport.scanner.model.PassportField
@@ -26,6 +28,7 @@ import ru.passport.scanner.model.RecognitionStatus
 import ru.passport.scanner.model.ScanImage
 import java.io.File
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ScanViewModelTest {
     private val dispatcher = StandardTestDispatcher()
 
@@ -71,6 +74,55 @@ class ScanViewModelTest {
         assertNull(vm.state.value.draft)
         assertEquals("EDITED", vm.state.value.value(PassportField.SURNAME))
         assertFalse(vm.state.value.isRecognizing)
+    }
+
+    @Test
+    fun ignoresRecognitionFailuresAfterUserEdit() = runTest(dispatcher) {
+        val failures = listOf(
+            PassportRepositoryException("repository failure"),
+            Exception("generic failure"),
+        )
+
+        failures.forEachIndexed { index, failure ->
+            val repository = DeferredRepository()
+            val vm = ScanViewModel(repository) { File("archive.7z") }
+            vm.pickImage(image("same-$index"))
+            vm.recognize()
+            runCurrent()
+            vm.editField(PassportField.SURNAME, "EDITED-$index")
+
+            repository.results.single().completeExceptionally(failure)
+            advanceUntilIdle()
+
+            assertEquals("EDITED-$index", vm.state.value.value(PassportField.SURNAME))
+            assertNull(vm.state.value.draft)
+            assertNull(vm.state.value.error)
+            assertFalse(vm.state.value.isRecognizing)
+        }
+    }
+
+    @Test
+    fun displaysCurrentRecognitionFailuresAndResetsLoading() = runTest(dispatcher) {
+        val failures = listOf(
+            PassportRepositoryException("repository failure") to "repository failure",
+            Exception("generic failure") to "Не удалось распознать изображение. Проверьте соединение и повторите запрос.",
+        )
+
+        failures.forEachIndexed { index, (failure, expectedError) ->
+            val repository = DeferredRepository()
+            val vm = ScanViewModel(repository) { File("archive.7z") }
+            vm.pickImage(image("current-$index"))
+            vm.recognize()
+            runCurrent()
+            assertTrue(vm.state.value.isRecognizing)
+
+            repository.results.single().completeExceptionally(failure)
+            advanceUntilIdle()
+
+            assertEquals(expectedError, vm.state.value.error)
+            assertNull(vm.state.value.draft)
+            assertFalse(vm.state.value.isRecognizing)
+        }
     }
 
     @Test
