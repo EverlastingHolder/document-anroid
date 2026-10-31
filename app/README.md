@@ -4,7 +4,7 @@ The `app` module is the single Android application module (`ru.passport.scanner`
 
 ## User flow and source of truth
 
-The user captures one passport spread with CameraX or selects one image through the system Photo Picker. The app shows the image without crop/rotate processing. If `OCR_USE_STUB` is unset, an empty `OCR_BASE_URL` selects the local demo repository with clearly labeled fake recognition data, while a non-empty URL selects the backend operation in [`../passport-backend/api/openapi.yaml`](../passport-backend/api/openapi.yaml): `POST /v1/passport/recognize`, multipart part `file`. Explicit `OCR_USE_STUB=true` or `false` overrides that default.
+The user captures a document spread with CameraX or selects one image through the system Photo Picker. The app shows the image without crop/rotate processing. The default `OCR_BASE_URL` is `http://192.168.1.91:8080`, so the app uses the backend operation in [`../passport-backend/api/openapi.yaml`](../passport-backend/api/openapi.yaml): `POST /v1/passport/recognize`, with exactly one multipart part named `file` and JPEG, PNG, or WebP content. Set `OCR_USE_STUB=true` to select the local demo repository with clearly labeled fake recognition data. An explicitly blank URL retains the previous demo default; `OCR_USE_STUB=false` selects the backend explicitly.
 
 In the default demo flow, an editable form is prefilled with 11 fake values and one shared demo badge identifies them as fake. The user edits the current values; field-level recognition/review markers and a separate confirmation action are not part of the flow. Validation errors remain visible, and export is enabled only when the current values are valid. Export builds a TXT from a defensive `PassportSnapshot(values, revision)` copy, then writes exactly that TXT into a genuine AES-encrypted 7z archive with password `123`. Sharing opens an email-only chooser with `ACTION_SEND` and recipient `test@mail.ru`. The app does not use SMTP or send mail through the backend.
 
@@ -12,9 +12,11 @@ Use the backend repository as the source of truth for API and data rules. Do not
 
 ## Endpoint configuration
 
-When `OCR_USE_STUB` is unset, an empty `OCR_BASE_URL` defaults to demo mode and a non-empty URL defaults to the backend. Explicit `OCR_USE_STUB=true` or `false` overrides this choice. In demo mode, the URL does not change repository selection, and the UI keeps a visible badge because the OCR data is fake.
+The default base URL is `http://192.168.1.91:8080`; `OCR_USE_STUB` defaults to false for that URL. Override the URL with `-POCR_BASE_URL=https://<host>` or a local HTTP server address. Use `-POCR_USE_STUB=true` for demo data, or set `-POCR_BASE_URL=` to retain the simple blank-URL demo setup. `OCR_USE_STUB=false` explicitly selects the backend. A non-empty URL must be an absolute HTTP or HTTPS URL with a host and no credentials, query, or fragment.
 
-When a real backend is ready, use `-POCR_BASE_URL=https://<real-domain>`; setting `-POCR_USE_STUB=false` explicitly is optional. With `OCR_USE_STUB=false`, an empty URL produces a clear configuration error when recognition is requested; release builds reject a non-empty URL without HTTPS. For a local debug server on the Android Emulator, use `-POCR_USE_STUB=false -POCR_BASE_URL=http://10.0.2.2:8080`; debug cleartext is allowed only for `localhost`, `127.0.0.1`, and `10.0.2.2`.
+For the default address, the Android phone and backend host must be on the same LAN. Start the backend listening on `0.0.0.0:8080` and allow inbound TCP port 8080 through the host firewall. The app's generated Network Security Config permits cleartext only to the exact host in the selected HTTP base URL, for both debug and release variants. HTTPS URLs create no cleartext exception; all other hosts remain blocked for HTTP.
+
+OCR can take several minutes on the local CPU runtime. The client uses a 15-second connection timeout and allows up to 10 minutes for a response. Network failures, non-success HTTP statuses, and backend JSON errors are shown as retryable recognition errors; retry uses the current image. A successful HTTP response is still an unconfirmed OCR draft and does not establish recognition quality or export delivery. The main send button validates the edited values and exports the canonical `PassportSnapshot` without a separate OCR confirmation action.
 
 ## Build and local SDK
 
@@ -27,7 +29,7 @@ export JAVA_HOME="$PWD/.tools/jdk17/Contents/Home"
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-The unit test `PassportExporterTest.writesSyntheticArchiveForIndependent7ZipVerification` writes a synthetic archive to `build/verification/archive-proof.7z` and its expected TXT sidecar. To verify it independently, install the macOS console binary as the ignored local file `.tools/7zip/7zz` from the official [7-Zip 26.05 archive](https://github.com/ip7z/7zip/releases/download/26.05/7z2605-mac.tar.xz), checking SHA-256 `12ef6830317743cfd3f0ab1724bde43fcc270d8b6d8564f8c12c2a2b7f993570`. After the unit test completes, run `./scripts/verify-archive-proof.sh` to test extraction, compare `passport.txt` with the sidecar, check the encrypted archive entry, and confirm wrong-password rejection.
+The unit test `PassportExporterTest.writesSyntheticArchiveForIndependent7ZipVerification` writes a synthetic archive to `build/verification/archive-proof.7z` and its expected TXT sidecar. Exports are named `document.7z` and contain `document.txt`. To verify the test archive independently, install the macOS console binary as the ignored local file `.tools/7zip/7zz` from the official [7-Zip 26.05 archive](https://github.com/ip7z/7zip/releases/download/26.05/7z2605-mac.tar.xz), checking SHA-256 `12ef6830317743cfd3f0ab1724bde43fcc270d8b6d8564f8c12c2a2b7f993570`. After the unit test completes, run `./scripts/verify-archive-proof.sh` to test extraction, compare `document.txt` with the sidecar, check the encrypted archive entry, and confirm wrong-password rejection.
 
 Provide `-POCR_BASE_URL=...` to use the real backend by default; you may also set `-POCR_USE_STUB=false` explicitly. Use an HTTPS endpoint for release builds; only debug builds permit local emulator HTTP.
 
