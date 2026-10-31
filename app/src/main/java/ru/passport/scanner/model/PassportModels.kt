@@ -62,7 +62,7 @@ object PassportValidator {
             if (field == PassportField.PATRONYMIC && value.isBlank()) return@forEach
             val error = when {
                 value.isBlank() -> "Заполните поле «${field.label.lowercase()}»."
-                field == PassportField.GENDER && value !in setOf("M", "F") -> "Укажите M или F."
+                field == PassportField.GENDER && value !in setOf("M", "F") -> "Выберите «МУЖ.» или «ЖЕН.»"
                 field == PassportField.BIRTH_DATE || field == PassportField.ISSUE_DATE -> {
                     val parsed = runCatching { java.time.LocalDate.parse(value) }.getOrNull()
                     if (value.length != 10 || parsed == null || parsed.toString() != value) "Введите дату в формате YYYY-MM-DD." else null

@@ -47,6 +47,7 @@ class PassportReviewFlowTest {
             },
             createArchive = { snapshot: PassportSnapshot ->
                 assertEquals("ПЕТРОВ", snapshot.values.getValue(PassportField.SURNAME))
+                assertEquals("F", snapshot.values.getValue(PassportField.GENDER))
                 archive.writeBytes(byteArrayOf(1))
                 archive
             },
@@ -64,6 +65,10 @@ class PassportReviewFlowTest {
         }
 
         compose.onNodeWithTag("field_surname").performTextReplacement("ПЕТРОВ")
+        compose.onNodeWithText("МУЖ.").assertIsDisplayed()
+        compose.onNodeWithText("ЖЕН.").assertIsDisplayed()
+        compose.onNodeWithTag("gender_F").assertIsDisplayed().performClick()
+        assertEquals("F", vm.state.value.value(PassportField.GENDER))
         compose.onAllNodesWithTag("review_surname").assertCountEquals(0)
         compose.onAllNodesWithTag("send_passport").assertCountEquals(1)
         compose.onNodeWithText("Подтвердить данные").assertDoesNotExist()

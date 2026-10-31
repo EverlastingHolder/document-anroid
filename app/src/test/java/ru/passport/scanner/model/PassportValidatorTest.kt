@@ -11,6 +11,16 @@ class PassportValidatorTest {
     }
 
     @Test
+    fun rejectsDisplayLabelsAsInputAndRequestsRussianChoice() {
+        val values = validValues() + (PassportField.GENDER to "МУЖ.")
+
+        val error = PassportValidator.validate(values).single()
+
+        assertEquals(PassportField.GENDER, error.field)
+        assertEquals("Выберите «МУЖ.» или «ЖЕН.»", error.message)
+    }
+
+    @Test
     fun rejectsImpossibleCalendarDateAndMalformedIdentifiersWithoutRepairingThem() {
         val values = validValues().toMutableMap().apply {
             put(PassportField.BIRTH_DATE, "2023-02-29")

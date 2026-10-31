@@ -140,7 +140,7 @@ fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onO
         topBar = {
             Column {
                 TopAppBar(
-                    title = { Text("Паспорт РФ", fontWeight = FontWeight.SemiBold) },
+                    title = { Text("Сканер документов", fontWeight = FontWeight.SemiBold) },
                     actions = {
                         if (state.image != null) TextButton(onClick = {
                             selectionGeneration += 1
@@ -227,10 +227,10 @@ private fun StartScreen(modifier: Modifier, error: String?, onCamera: () -> Unit
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(28.dp), modifier = Modifier.size(88.dp)) {
-            Box(contentAlignment = Alignment.Center) { Text("РФ", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
+            Box(contentAlignment = Alignment.Center) { Text("DOC", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         }
         Spacer(Modifier.height(22.dp))
-        Text("Сканирование паспорта", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Сканирование документа", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text("Снимите разворот или выберите готовое фото. Перед отправкой можно проверить и исправить каждое поле.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(26.dp))
@@ -260,7 +260,7 @@ private fun ImageReviewScreen(
         Text("Проверьте снимок", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("На фото должен быть виден весь разворот.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (bitmap != null) {
-            Image(bitmap = bitmap.asImageBitmap(), contentDescription = "Выбранное фото паспорта", modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp)))
+            Image(bitmap = bitmap.asImageBitmap(), contentDescription = "Выбранное изображение", modifier = Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp)))
         } else {
             Box(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
                 if (previewLoading) CircularProgressIndicator() else Text("Предпросмотр недоступен. Можно выбрать другое фото или продолжить распознавание.", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -283,7 +283,7 @@ private fun ReviewScreen(modifier: Modifier, viewModel: ScanViewModel, isExporti
     val state by viewModel.state.collectAsStateWithLifecycle()
     Column(modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-            Text("Данные паспорта", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Данные документа", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text("Распознанные значения можно отредактировать перед отправкой.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (state.draft?.warnings.orEmpty().isNotEmpty()) {
@@ -333,7 +333,21 @@ private fun PassportFieldEditor(
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(field.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            OutlinedTextField(
+            if (field == PassportField.GENDER) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("M" to "МУЖ.", "F" to "ЖЕН.").forEach { (code, label) ->
+                        val selected = value == code
+                        OutlinedButton(
+                            onClick = { onValueChange(code) },
+                            modifier = Modifier.weight(1f).testTag("gender_$code"),
+                            border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                        ) {
+                            Text(label)
+                        }
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            } else OutlinedTextField(
                 value = value,
                 onValueChange = onValueChange,
                 modifier = Modifier.fillMaxWidth().testTag("field_${field.apiKey}"),
@@ -345,7 +359,6 @@ private fun PassportFieldEditor(
                 supportingText = when {
                     error != null -> ({ Text(error) })
                     isDate -> ({ Text("Введите дату как YYYY-MM-DD, например 1990-04-12") })
-                    field == PassportField.GENDER -> ({ Text("Канонический код: M или F") })
                     field == PassportField.SERIES -> ({ Text("4 цифры; ведущие нули сохраняются") })
                     field == PassportField.NUMBER -> ({ Text("6 цифр; ведущие нули сохраняются") })
                     field == PassportField.PATRONYMIC -> ({ Text("Необязательное поле") })
