@@ -27,7 +27,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                     KtorPassportRepository(
                         baseUrl = BuildConfig.OCR_BASE_URL,
-                        allowLocalHttp = BuildConfig.DEBUG,
                     )
                 }
                 val exporter = PassportExporter(cacheDir)

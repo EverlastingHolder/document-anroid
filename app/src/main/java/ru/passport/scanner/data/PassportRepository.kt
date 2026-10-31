@@ -4,6 +4,9 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.request.forms.MultiPartFormDataContent
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.header
@@ -27,6 +30,7 @@ import ru.passport.scanner.model.PassportValue
 import ru.passport.scanner.model.RecognitionStatus
 import ru.passport.scanner.model.ScanImage
 import java.net.URI
+import java.net.SocketTimeoutException
 import java.time.LocalDate
 
 interface PassportRepository {
@@ -40,7 +44,6 @@ class PassportRepositoryException(message: String, cause: Throwable? = null) : E
 class KtorPassportRepository(
     private val baseUrl: String,
     private val client: HttpClient = defaultClient(),
-    private val allowLocalHttp: Boolean = false,
 ) : PassportRepository {
     override fun close() = client.close()
 
@@ -67,7 +70,7 @@ class KtorPassportRepository(
                                     "file",
                                     headers = headersOf(
                                         HttpHeaders.ContentDisposition,
-                                        "form-data; name=\"file\"; filename=\"scan\"",
+                                        "filename=\"scan\"",
                                         HttpHeaders.ContentType,
                                         image.mimeType,
                                     ),
@@ -80,11 +83,17 @@ class KtorPassportRepository(
             }
         } catch (e: PassportRepositoryException) {
             throw e
+        } catch (e: HttpRequestTimeoutException) {
+            throw PassportRepositoryException("Распознавание заняло слишком много времени. Повторите запрос.")
+        } catch (e: SocketTimeoutException) {
+            throw PassportRepositoryException("Распознавание заняло слишком много времени. Повторите запрос.")
+        } catch (e: ConnectTimeoutException) {
+            throw PassportRepositoryException("Не удалось подключиться к серверу. Проверьте сеть и доступность API, затем повторите запрос.")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // Exception details can contain request data or transport internals; never expose/log them.
-            throw PassportRepositoryException("Не удалось связаться с сервером. Проверьте интернет и повторите запрос.")
+            throw PassportRepositoryException("Не удалось связаться с сервером. Проверьте подключение к сети и доступность API, затем повторите запрос.")
         }
 
         if (response.status != HttpStatusCode.OK) {
@@ -95,7 +104,11 @@ class KtorPassportRepository(
             } catch (_: Exception) {
                 null
             }
-            throw PassportRepositoryException(error?.code?.let(::safeErrorMessage) ?: "Сервер не смог обработать изображение. Повторите запрос.")
+            val expectedCode = ERROR_CODES_BY_STATUS[response.status.value]
+            val validError = error?.takeIf {
+                it.requestId.matches(UUID_PATTERN) && it.message.isNotBlank() && it.code == expectedCode
+            }
+            throw PassportRepositoryException(validError?.let { safeErrorMessage(it.code) } ?: GENERIC_SERVER_ERROR)
         }
         val dto = try {
             response.body<RecognitionResponse>()
@@ -134,31 +147,48 @@ class KtorPassportRepository(
         if (config.isBlank()) throw PassportRepositoryException("Адрес сервера распознавания не настроен.")
         val uri = runCatching { URI(config.trim()) }.getOrNull()
         if (uri == null) {
-            throw PassportRepositoryException("Для распознавания требуется настроить HTTPS-адрес сервера.")
+            throw PassportRepositoryException("Укажите корректный HTTP- или HTTPS-адрес сервера распознавания.")
         }
-        val isHttps = uri.scheme.equals("https", ignoreCase = true)
-        val isAllowedLocalHttp = allowLocalHttp && uri.scheme.equals("http", ignoreCase = true) &&
-            uri.host?.lowercase() in LOCAL_HTTP_HOSTS
-        if ((!isHttps && !isAllowedLocalHttp) || uri.host.isNullOrBlank() ||
+        val supportedScheme = uri.scheme.equals("https", ignoreCase = true) || uri.scheme.equals("http", ignoreCase = true)
+        if (!supportedScheme || uri.host.isNullOrBlank() ||
             uri.rawQuery != null || uri.rawFragment != null || uri.rawUserInfo != null
         ) {
-            throw PassportRepositoryException("Для распознавания требуется настроить HTTPS-адрес сервера.")
+            throw PassportRepositoryException("Укажите корректный HTTP- или HTTPS-адрес сервера распознавания.")
         }
         return config.trim().trimEnd('/') + "/v1/passport/recognize"
     }
 
     private fun safeErrorMessage(code: String): String = when (code) {
-        "invalid_request", "unsupported_media_type" -> "Не удалось отправить изображение. Выберите JPEG, PNG или WebP и повторите запрос."
-        "upload_too_large" -> "Изображение слишком большое. Выберите другой снимок."
+        "invalid_request" -> "Не удалось отправить запрос. Проверьте изображение и повторите попытку."
+        "access_denied" -> "Сервер запретил доступ. Проверьте адрес сервера или подключение к сети."
+        "upload_too_large" -> "Изображение слишком большое. Выберите другой снимок и повторите попытку."
+        "unsupported_media_type" -> "Поддерживаются изображения JPEG, PNG и WebP. Выберите другой файл."
         "image_unprocessable" -> "Не удалось обработать это изображение. Выберите другой снимок или повторите запрос."
-        "concurrency_limit_reached", "ocr_unavailable", "processing_timeout" -> "Сервис распознавания временно недоступен. Попробуйте ещё раз позже."
-        else -> "Сервер не смог обработать изображение. Повторите запрос."
+        "concurrency_limit_reached" -> "Сервис занят. Повторите запрос немного позже."
+        "processing_failed" -> "Сервер не смог обработать изображение. Повторите запрос позже."
+        "ocr_unavailable" -> "Сервис распознавания временно недоступен. Попробуйте ещё раз позже."
+        "processing_timeout" -> "Распознавание заняло слишком много времени. Повторите запрос."
+        "not_found", "method_not_allowed" -> "Адрес сервера распознавания настроен неверно. Проверьте его и повторите запрос."
+        else -> GENERIC_SERVER_ERROR
     }
 
     companion object {
         private val SUPPORTED_MEDIA_TYPES = setOf("image/jpeg", "image/png", "image/webp")
         private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-        private val LOCAL_HTTP_HOSTS = setOf("localhost", "127.0.0.1", "10.0.2.2")
+        private const val GENERIC_SERVER_ERROR = "Сервер не смог обработать изображение. Повторите запрос."
+        private val ERROR_CODES_BY_STATUS = mapOf(
+            400 to "invalid_request",
+            403 to "access_denied",
+            413 to "upload_too_large",
+            415 to "unsupported_media_type",
+            422 to "image_unprocessable",
+            429 to "concurrency_limit_reached",
+            500 to "processing_failed",
+            503 to "ocr_unavailable",
+            504 to "processing_timeout",
+            404 to "not_found",
+            405 to "method_not_allowed",
+        )
         private val FIELD_ISSUE_CODES = setOf(
             "conflicting_field_candidates",
             "manual_review_required",
@@ -166,8 +196,18 @@ class KtorPassportRepository(
         )
 
         fun defaultClient(): HttpClient = HttpClient(OkHttp) {
+            engine {
+                config {
+                    retryOnConnectionFailure(false)
+                }
+            }
             expectSuccess = false
             followRedirects = false
+            install(HttpTimeout) {
+                requestTimeoutMillis = 600_000
+                socketTimeoutMillis = 600_000
+                connectTimeoutMillis = 15_000
+            }
             install(ContentNegotiation) {
                 json(Json { ignoreUnknownKeys = false })
             }

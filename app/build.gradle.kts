@@ -1,4 +1,10 @@
 import java.net.URI
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -8,23 +14,84 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-val ocrBaseUrl = providers.gradleProperty("OCR_BASE_URL").orElse("").get().trim()
+abstract class GenerateNetworkSecurityConfig : DefaultTask() {
+    @get:Input
+    abstract val httpHost: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val host = httpHost.get().takeIf(String::isNotBlank)?.let { value ->
+            value
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;")
+        }
+        val config = buildString {
+            appendLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>")
+            appendLine("<network-security-config>")
+            appendLine("    <base-config cleartextTrafficPermitted=\"false\" />")
+            if (host != null) {
+                appendLine("    <domain-config cleartextTrafficPermitted=\"true\">")
+                appendLine("        <domain includeSubdomains=\"false\">$host</domain>")
+                appendLine("    </domain-config>")
+            }
+            appendLine("</network-security-config>")
+        }
+        val output = outputDirectory.file("xml/network_security_config.xml").get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(config)
+    }
+}
+
+val ocrBaseUrl = providers.gradleProperty("OCR_BASE_URL")
+    .orElse("http://192.168.1.91:8080")
+    .get()
+    .trim()
 val ocrUseStub = providers.gradleProperty("OCR_USE_STUB").orElse(ocrBaseUrl.isBlank().toString()).get().toBooleanStrictOrNull()
     ?: throw GradleException("OCR_USE_STUB must be exactly 'true' or 'false'.")
 
 fun buildConfigString(value: String): String =
     "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
-fun parsedUrl(value: String): URI? = value.takeIf(String::isNotBlank)?.let {
-    runCatching { URI(it) }.getOrNull()
+val ocrBaseUri = ocrBaseUrl.takeIf(String::isNotBlank)?.let { value ->
+    val uri = runCatching { URI(value) }.getOrElse {
+        throw GradleException("OCR_BASE_URL must be a valid absolute HTTP or HTTPS URL.", it)
+    }
+    val isHttp = uri.scheme?.equals("http", ignoreCase = true) == true
+    val isHttps = uri.scheme?.equals("https", ignoreCase = true) == true
+    if (uri.isOpaque || !isHttp && !isHttps || uri.host.isNullOrBlank() ||
+        uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null ||
+        uri.port !in -1..65535 || uri.port == 0
+    ) {
+        throw GradleException("OCR_BASE_URL must use HTTP or HTTPS, include a host, and omit credentials, query, and fragment.")
+    }
+    uri
 }
 
-gradle.taskGraph.whenReady {
-    val releaseRequested = allTasks.any { task -> task.path.contains("release", ignoreCase = true) }
-    if (releaseRequested && !ocrUseStub && ocrBaseUrl.isNotBlank() &&
-        !parsedUrl(ocrBaseUrl)?.scheme.equals("https", ignoreCase = true)
+val generateNetworkSecurityConfig = tasks.register("generateNetworkSecurityConfig")
+
+androidComponents.onVariants { variant ->
+    val variantTask = tasks.register<GenerateNetworkSecurityConfig>(
+        "generate${variant.name.replaceFirstChar { it.uppercaseChar() }}NetworkSecurityConfig",
     ) {
-        throw GradleException("OCR_BASE_URL must use HTTPS for release builds.")
+        httpHost.set(
+            ocrBaseUri
+                ?.takeIf { it.scheme.equals("http", ignoreCase = true) }
+                ?.host
+                .orEmpty(),
+        )
+    }
+    variant.sources.res?.addGeneratedSourceDirectory(
+        variantTask,
+        GenerateNetworkSecurityConfig::outputDirectory,
+    )
+    generateNetworkSecurityConfig.configure {
+        dependsOn(variantTask)
     }
 }
 
