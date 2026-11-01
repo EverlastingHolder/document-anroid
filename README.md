@@ -2,6 +2,8 @@
 
 Android-приложение для съёмки или выбора изображения документа, распознавания данных, их редактирования и экспорта.
 
+[Скачать APK для Android 8.0+](https://github.com/EverlastingHolder/document-anroid/releases/download/v1.0.0/document-scanner-1.0.apk) — debug-сборка. Для распознавания требуется доступный сервер.
+
 ## Требования
 
 - JDK 17
