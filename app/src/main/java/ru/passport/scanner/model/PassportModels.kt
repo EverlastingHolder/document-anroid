@@ -1,6 +1,5 @@
 package ru.passport.scanner.model
 
-import java.io.File
 
 enum class PassportField(val apiKey: String, val label: String) {
     SURNAME("surname", "Фамилия"),
@@ -50,7 +49,23 @@ data class PassportSnapshot(
     fun defensiveCopy(): PassportSnapshot = copy(values = values.toMap())
 }
 
-data class ScanImage(val id: String, val file: File, val mimeType: String)
+/** Document bytes and preview data live only in process memory. */
+class ScanImage(id: String, bytes: ByteArray, val mimeType: String, val preview: android.graphics.Bitmap? = null) {
+    /** Compatibility helper for JVM fixtures; app production flows use byte arrays. */
+    constructor(id: String, file: java.io.File, mimeType: String) : this(
+        id,
+        if (file.isFile) file.readBytes() else byteArrayOf(0),
+        mimeType,
+    )
+    val id: String = id
+    private val contents = bytes.copyOf()
+    val bytes: ByteArray get() = contents.copyOf()
+    val sizeBytes: Int get() = contents.size
+    fun eraseInMemory() {
+        contents.fill(0)
+    }
+    override fun toString(): String = "ScanImage(id=[redacted], bytes=[redacted])"
+}
 
 data class FieldValidationError(val field: PassportField, val message: String)
 

@@ -8,6 +8,7 @@ import androidx.exifinterface.media.ExifInterface
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
 import java.util.UUID
 import org.junit.Assert.assertArrayEquals
@@ -31,11 +32,12 @@ class ScanImageFilesTest {
                 saveAttributes()
             }
             val originalBytes = file.readBytes()
-
-            val image = ScanImageFiles.cameraImage(file)
+            val input = originalBytes.copyOf()
+            val image = ScanImageFiles.createImage("normal", input, "image/jpeg")
 
             assertEquals("image/jpeg", image.mimeType)
-            assertArrayEquals(originalBytes, image.file.readBytes())
+            assertArrayEquals(originalBytes, image.bytes)
+            assertTrue(input.all { it == 0.toByte() })
         } finally {
             file.delete()
         }
@@ -51,19 +53,19 @@ class ScanImageFilesTest {
                 saveAttributes()
             }
             val originalBytes = file.readBytes()
-
-            val image = ScanImageFiles.cameraImage(file)
-            val options = BitmapFactoryBounds.read(image.file)
-            val preview = requireNotNull(ScanImageFiles.decodePreview(image.file))
+            val image = ScanImageFiles.createImage("rotated", originalBytes.copyOf(), "image/jpeg")
+            val bytes = image.bytes
+            val options = BitmapFactoryBounds.read(bytes)
+            val preview = requireNotNull(image.preview)
             try {
                 assertEquals("image/jpeg", image.mimeType)
-                assertFalse(originalBytes.contentEquals(image.file.readBytes()))
+                assertFalse(originalBytes.contentEquals(bytes))
                 assertEquals(60, options.first)
                 assertEquals(100, options.second)
                 assertEquals(options.first, preview.width)
                 assertEquals(options.second, preview.height)
                 assertFalse(
-                    ExifInterface(image.file).getAttributeInt(
+                    ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(
                         ExifInterface.TAG_ORIENTATION,
                         ExifInterface.ORIENTATION_NORMAL,
                     ) == ExifInterface.ORIENTATION_ROTATE_90,
@@ -79,17 +81,17 @@ class ScanImageFilesTest {
     }
 
     @Test
-    fun pickerRejectsUndecodableImageAndRemovesItsPrivateCopy() {
+    fun pickerRejectsUndecodableImageWithoutCreatingAppImageCopies() {
+        ScanImageFiles.cleanupLegacyScanFiles(context.cacheDir)
         val source = temporaryFile("broken.jpg")
         val scansDirectory = File(context.cacheDir, "scans")
-        val existingFiles = scansDirectory.listFiles().orEmpty().toSet()
         try {
             source.writeText("not an image", Charsets.UTF_8)
 
             val result = runCatching { ScanImageFiles.copyFromPicker(context, Uri.fromFile(source)) }
 
             assertTrue("Corrupt picker input must be rejected", result.isFailure)
-            assertEquals(existingFiles, scansDirectory.listFiles().orEmpty().toSet())
+            assertFalse(scansDirectory.exists())
         } finally {
             source.delete()
         }
@@ -124,9 +126,9 @@ class ScanImageFilesTest {
     }
 
     private object BitmapFactoryBounds {
-        fun read(file: File): Pair<Int, Int> {
+        fun read(bytes: ByteArray): Pair<Int, Int> {
             val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
             return options.outWidth to options.outHeight
         }
     }

@@ -30,8 +30,8 @@ class PassportEmailHandoffTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val testContext = instrumentation.context
-        val archive = PassportExporter(targetContext.cacheDir).createArchive(currentSnapshot())
-        val archiveBytes = archive.readBytes()
+        val archiveBytes = PassportExporter().createArchive(currentSnapshot())
+        val archiveUri = MemoryExportStore.publish(targetContext, archiveBytes)
         val expectedHash = sha256(archiveBytes)
         val resultAction = "${targetContext.packageName}.${FakeEmailActivity.RESULT_ACTION}.${UUID.randomUUID()}"
         val latch = CountDownLatch(1)
@@ -67,7 +67,7 @@ class PassportEmailHandoffTest {
                 archiveHandlers.any { it.activityInfo?.packageName == testContext.packageName },
             )
 
-            val chooser = PassportEmail.createChooserIntent(targetContext, archive)
+            val chooser = PassportEmail.createChooserIntent(targetContext, archiveUri)
             val candidates = listOfNotNull(
                 chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT),
             ) + chooser.getParcelableArrayExtra(Intent.EXTRA_INITIAL_INTENTS)
@@ -101,7 +101,8 @@ class PassportEmailHandoffTest {
             assertNotEquals("Fake email activity must run outside the target app UID.", Process.myUid(), fakeActivityUid)
         } finally {
             targetContext.unregisterReceiver(receiver)
-            archive.parentFile?.deleteRecursively()
+            MemoryExportStore.clear(targetContext, archiveUri)
+            archiveBytes.fill(0)
         }
     }
 

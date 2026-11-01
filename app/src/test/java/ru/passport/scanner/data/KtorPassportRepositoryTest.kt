@@ -31,6 +31,306 @@ import java.io.File
 
 class KtorPassportRepositoryTest {
     @Test
+    fun submitsAsyncMultipartWithCapturedBearerAndStableIdempotencyKey() = runTest {
+        val image = imageFile()
+        val capturedRequests = mutableListOf<HttpRequestData>()
+        val repository = KtorPassportRepository(
+            "https://api.example.test",
+            mockClient { request ->
+                capturedRequests += request
+                respond(
+                    """{"job_id":"123e4567-e89b-42d3-a456-426614174000","status":"queued","status_url":"/v1/passport/jobs/123e4567-e89b-42d3-a456-426614174000","created_at":"2026-10-31T10:00:00Z"}""",
+                    HttpStatusCode.Accepted,
+                    headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                )
+            },
+        )
+        val connection = connection("pbt1_" + "A".repeat(43))
+
+        val accepted = repository.submit(
+            AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"),
+            "123e4567-e89b-42d3-a456-426614174001",
+            "stable-retry-key-1",
+            connection,
+        )
+
+        assertEquals("123e4567-e89b-42d3-a456-426614174000", accepted.jobId)
+        assertEquals(JobState.QUEUED, accepted.status)
+        assertEquals("/v1/passport/jobs/${accepted.jobId}", accepted.statusUrl)
+        val request = capturedRequests.single()
+        assertEquals("POST", request.method.value)
+        assertEquals(connection.authorizationHeaderValue(), request.headers["Authorization"])
+        assertEquals("stable-retry-key-1", request.headers["Idempotency-Key"])
+        assertEquals("123e4567-e89b-42d3-a456-426614174001", request.headers["X-Request-ID"])
+        val multipart = request.body as OutgoingContent
+        assertTrue(multipart.contentType.toString().startsWith("multipart/form-data"))
+        val raw = String(multipart.toByteArray(), Charsets.ISO_8859_1)
+        assertTrue(raw.contains("name=\"file\"; filename=\"scan\""))
+        assertTrue(raw.contains("Content-Type: image/jpeg\r\n"))
+        assertTrue(raw.contains("\u0001\u0002\u0003"))
+        repository.close()
+        image.delete()
+    }
+
+    @Test
+    fun readsEveryJobStateAndMapsCompletedCanonicalResultUsingJobId() = runTest {
+        val jobId = "123e4567-e89b-42d3-a456-426614174000"
+        val bodies = listOf(
+            """{"job_id":"$jobId","status":"queued","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:00:00Z","started_at":"2026-10-31T10:00:30Z","finished_at":null}""",
+            """{"job_id":"$jobId","status":"processing","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:01:00Z","started_at":"2026-10-31T10:01:00Z","finished_at":null}""",
+            """{"job_id":"$jobId","status":"completed","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:02:00Z","started_at":"2026-10-31T10:01:00Z","finished_at":"2026-10-31T10:02:00Z","result":${successResponse().replace("123e4567-e89b-12d3-a456-426614174000", jobId)}}""",
+            """{"job_id":"$jobId","status":"failed","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:02:00Z","started_at":null,"finished_at":"2026-10-31T10:02:00Z","error":{"code":"processing_timeout","message":"safe timeout"}}""",
+        )
+        val requests = mutableListOf<HttpRequestData>()
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val repository = KtorPassportRepository(
+            connection.baseUrl,
+            mockClient { request ->
+                requests += request
+                val index = requests.lastIndex
+                respond(bodies[index], HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()))
+            },
+        )
+
+        val queued = repository.readStatus(jobId, "123e4567-e89b-42d3-a456-426614174001", connection)
+        val processing = repository.readStatus(jobId, "123e4567-e89b-42d3-a456-426614174002", connection)
+        val completed = repository.readStatus(jobId, "123e4567-e89b-42d3-a456-426614174003", connection)
+        val failed = repository.readStatus(jobId, "123e4567-e89b-42d3-a456-426614174004", connection)
+
+        assertTrue(queued is JobStatus.Queued)
+        assertTrue(processing is JobStatus.Processing)
+        assertTrue(completed is JobStatus.Completed)
+        assertEquals(jobId, (completed as JobStatus.Completed).jobId)
+        assertEquals("0012", completed.result.values.getValue(PassportField.SERIES).value)
+        assertFalse(completed.toString().contains("ИВАНОВ"))
+        assertFalse(completed.toString().contains(jobId))
+        assertTrue(failed is JobStatus.Failed)
+        assertEquals("processing_timeout", (failed as JobStatus.Failed).errorCode)
+        assertTrue(requests.all { it.headers["Authorization"] == connection.authorizationHeaderValue() })
+        assertEquals(listOf("123e4567-e89b-42d3-a456-426614174001", "123e4567-e89b-42d3-a456-426614174002", "123e4567-e89b-42d3-a456-426614174003", "123e4567-e89b-42d3-a456-426614174004"), requests.map { it.headers["X-Request-ID"] })
+        assertTrue(requests.all { it.url.toString() == "https://api.example.test/v1/passport/jobs/$jobId" })
+        assertTrue(requests.all { it.method.value == "GET" })
+        repository.close()
+    }
+
+    @Test
+    fun receiptUsesEmptyPostWithClientAuthAndNoIdempotencyHeader() = runTest {
+        val captured = mutableListOf<HttpRequestData>()
+        val jobId = "123e4567-e89b-42d3-a456-426614174000"
+        val requestId = "123e4567-e89b-42d3-a456-426614174001"
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val repository = KtorPassportRepository(connection.baseUrl, mockClient { request ->
+            captured += request
+            respond("", HttpStatusCode.NoContent)
+        })
+
+        repository.acknowledgeReceipt(jobId, requestId, connection)
+
+        val request = captured.single()
+        assertEquals("POST", request.method.value)
+        assertEquals("/v1/passport/jobs/$jobId/receipt", request.url.encodedPath)
+        assertEquals(connection.authorizationHeaderValue(), request.headers["Authorization"])
+        assertEquals(requestId, request.headers["X-Request-ID"])
+        assertEquals(null, request.headers["Idempotency-Key"])
+        assertEquals(0, (request.body as OutgoingContent).toByteArray().size)
+        repository.close()
+    }
+
+    @Test
+    fun mapsReceiptConflictAndPurgedStatusWithoutLeakingServerDetails() = runTest {
+        val jobId = "123e4567-e89b-42d3-a456-426614174000"
+        val requestId = "123e4567-e89b-42d3-a456-426614174001"
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val responses = ArrayDeque(listOf(
+            HttpStatusCode.Conflict to "job_not_terminal",
+            HttpStatusCode.Gone to "job_result_gone",
+        ))
+        val repository = KtorPassportRepository(connection.baseUrl, mockClient {
+            val (status, code) = responses.removeFirst()
+            respond(
+                """{"request_id":"$requestId","code":"$code","message":"private server payload"}""",
+                status,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        })
+
+        val receiptFailure = runCatching { repository.acknowledgeReceipt(jobId, requestId, connection) }.exceptionOrNull()
+        val statusFailure = runCatching { repository.readStatus(jobId, requestId, connection) }.exceptionOrNull()
+
+        assertEquals(AsyncFailureCategory.JOB_NOT_TERMINAL, (receiptFailure as AsyncJobRepositoryException).category)
+        assertEquals(AsyncFailureCategory.JOB_RESULT_GONE, (statusFailure as AsyncJobRepositoryException).category)
+        assertFalse(receiptFailure.message.orEmpty().contains("private server payload"))
+        assertFalse(statusFailure.message.orEmpty().contains("private server payload"))
+        repository.close()
+    }
+
+    @Test
+    fun rejectsForeignStatusUrlAndNeverFollowsItWithBearerCredential() = runTest {
+        val image = imageFile()
+        var requestCount = 0
+        val repository = KtorPassportRepository(
+            "https://api.example.test",
+            mockClient {
+                requestCount += 1
+                respond(
+                    """{"job_id":"123e4567-e89b-42d3-a456-426614174000","status":"queued","status_url":"https://attacker.example/collect","created_at":"2026-10-31T10:00:00Z"}""",
+                    HttpStatusCode.Accepted,
+                    headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                )
+            },
+        )
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val error = runCatching {
+            repository.submit(AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"), "123e4567-e89b-42d3-a456-426614174001", "same-key", connection)
+        }.exceptionOrNull()
+
+        assertTrue(error is PassportRepositoryException)
+        assertEquals("https://attacker.example/collect".contains(error?.message.orEmpty()), false)
+        assertEquals(1, requestCount)
+        repository.close()
+        image.delete()
+    }
+
+    @Test
+    fun rejectsMalformedStatusSnapshotsAndDoesNotExposeServerPayloads() = runTest {
+        val jobId = "123e4567-e89b-42d3-a456-426614174000"
+        val bodies = listOf(
+            """{"job_id":"$jobId","status":"queued","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:00:00Z","started_at":null,"finished_at":null,"result":{"secret":"passport"}}""",
+            """{"job_id":"$jobId","status":"completed","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:02:00Z","started_at":"2026-10-31T10:01:00Z","finished_at":"2026-10-31T10:02:00Z","result":${successResponse().replace("123e4567-e89b-12d3-a456-426614174000", "123e4567-e89b-42d3-a456-426614174099")}}""",
+            """{"job_id":"$jobId","status":"failed","created_at":"2026-10-31T10:00:00Z","updated_at":"2026-10-31T10:02:00Z","started_at":null,"finished_at":"2026-10-31T10:02:00Z","error":{"code":"unknown_private_code","message":"passport secret"}}""",
+        )
+        bodies.forEach { body ->
+            val connection = connection("pbt1_" + "A".repeat(43))
+            val repository = KtorPassportRepository(
+                connection.baseUrl,
+                mockClient { respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())) },
+            )
+            val failure = runCatching {
+                repository.readStatus(jobId, "123e4567-e89b-42d3-a456-426614174001", connection)
+            }.exceptionOrNull()
+            assertTrue(failure is PassportRepositoryException)
+            assertFalse(failure?.message.orEmpty().contains("passport"))
+            assertFalse(failure?.message.orEmpty().contains("secret"))
+            repository.close()
+        }
+    }
+
+    @Test
+    fun sendsSameCallerProvidedKeyOnRepeatedSubmissionAndDoesNotRetryPostInternally() = runTest {
+        val image = imageFile()
+        var count = 0
+        val seenKeys = mutableListOf<String?>()
+        val repository = KtorPassportRepository(
+            "https://api.example.test",
+            mockClient { request ->
+                count += 1
+                seenKeys += request.headers["Idempotency-Key"]
+                respond("unavailable", HttpStatusCode.ServiceUnavailable)
+            },
+        )
+        val connection = connection("pbt1_" + "A".repeat(43))
+        repeat(2) {
+            runCatching {
+                repository.submit(AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"), "123e4567-e89b-42d3-a456-426614174001", "stable-key", connection)
+            }.onFailure { failure ->
+                assertTrue(failure is AsyncJobRepositoryException)
+                assertEquals(AsyncFailureCategory.SERVER_UNAVAILABLE, (failure as AsyncJobRepositoryException).category)
+                assertEquals(503, failure.httpStatus)
+            }
+        }
+        assertEquals(2, count)
+        assertEquals(listOf("stable-key", "stable-key"), seenKeys)
+        repository.close()
+        image.delete()
+    }
+
+    @Test
+    fun mapsAsyncConflictSafelyAndRejectsMismatchedErrorCorrelation() = runTest {
+        val image = imageFile()
+        val requestId = "123e4567-e89b-42d3-a456-426614174001"
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val responses = ArrayDeque(
+            listOf(
+                """{"request_id":"$requestId","code":"idempotency_conflict","message":"private server detail"}""",
+                """{"request_id":"123e4567-e89b-42d3-a456-426614174002","code":"idempotency_conflict","message":"private server detail"}""",
+            ),
+        )
+        val repository = KtorPassportRepository(
+            connection.baseUrl,
+            mockClient { respond(responses.removeFirst(), HttpStatusCode.Conflict, headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())) },
+        )
+
+        val first = runCatching {
+            repository.submit(AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"), requestId, "same-key", connection)
+        }.exceptionOrNull()
+        val second = runCatching {
+            repository.submit(AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"), requestId, "same-key", connection)
+        }.exceptionOrNull()
+
+        assertTrue(first?.message.orEmpty().contains("Не меняйте ключ"))
+        assertTrue(first is AsyncJobRepositoryException)
+        assertEquals(AsyncFailureCategory.IDEMPOTENCY_CONFLICT, (first as AsyncJobRepositoryException).category)
+        assertEquals(409, first.httpStatus)
+        assertFalse(first?.message.orEmpty().contains("private server detail"))
+        assertEquals(AsyncFailureCategory.IDEMPOTENCY_CONFLICT, (second as AsyncJobRepositoryException).category)
+        assertEquals("Ключ отправки уже связан с другими данными. Не меняйте ключ для повтора.", second.message)
+        repository.close()
+        image.delete()
+    }
+
+    @Test
+    fun refusesInvalidIdempotencyKeyBeforeNetworkRequest() = runTest {
+        val image = imageFile()
+        var requestCount = 0
+        val repository = KtorPassportRepository(
+            "https://api.example.test",
+            mockClient { requestCount += 1; error("must not send") },
+        )
+        val error = runCatching {
+            repository.submit(
+                AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg"),
+                "123e4567-e89b-42d3-a456-426614174001",
+                "bad key with spaces",
+                connection("pbt1_" + "A".repeat(43)),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(error is PassportRepositoryException)
+        assertEquals(0, requestCount)
+        repository.close()
+        image.delete()
+    }
+
+    @Test
+    fun categorizesAmbiguousAsyncTimeoutAndPropagatesCancellation() = runTest {
+        val connection = connection("pbt1_" + "A".repeat(43))
+        val timeoutRepository = KtorPassportRepository(
+            connection.baseUrl,
+            mockClient { throw HttpRequestTimeoutException(HttpRequestBuilder()) },
+        )
+        val payload = AsyncUploadPayload(byteArrayOf(1, 2, 3), "image/jpeg")
+        val timeout = runCatching {
+            timeoutRepository.submit(payload, "123e4567-e89b-42d3-a456-426614174001", "stable-key", connection)
+        }.exceptionOrNull()
+        assertTrue(timeout is AsyncJobRepositoryException)
+        assertEquals(AsyncFailureCategory.TIMEOUT, (timeout as AsyncJobRepositoryException).category)
+        assertEquals(null, timeout.httpStatus)
+        timeoutRepository.close()
+
+        val cancellation = CancellationException("test cancellation")
+        val cancelledRepository = KtorPassportRepository(connection.baseUrl, mockClient { throw cancellation })
+        val cancelled = runCatching {
+            cancelledRepository.readStatus(
+                "123e4567-e89b-42d3-a456-426614174000",
+                "123e4567-e89b-42d3-a456-426614174002",
+                connection,
+            )
+        }.exceptionOrNull()
+        assertTrue(cancelled is CancellationException)
+        cancelledRepository.close()
+    }
+
+    @Test
     fun postsExpectedMultipartAndMapsStrictRecognitionSchema() = runTest {
         val image = imageFile()
         var seenUrl = ""
@@ -305,6 +605,8 @@ class KtorPassportRepositoryTest {
             followRedirects = false
             install(ContentNegotiation) { json(Json { ignoreUnknownKeys = false }) }
         }
+
+    private fun connection(token: String) = ApiConnection("https://api.example.test", token, "test-installation")
 
     private fun imageFile(): File = File.createTempFile("passport-scan-test", ".jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
 

@@ -1,50 +1,48 @@
 package ru.passport.scanner.export
 
-import java.io.File
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.nio.channels.SeekableByteChannel
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import ru.passport.scanner.model.PassportSnapshot
 import ru.passport.scanner.model.PassportField
+import ru.passport.scanner.model.PassportSnapshot
 import ru.passport.scanner.model.PassportValidator
 
 class PassportExporterTest {
     @Test
-    fun archiveHasOneTextEntryEncryptedWithPassword123AndUsesCurrentSnapshotValues() {
+    fun archiveIsEncryptedInMemoryAndContainsOnlyCurrentSnapshotValues() {
         val cacheDir = Files.createTempDirectory("passport-export-test").toFile()
-        val draft = fixture("OCR draft")
         val snapshot = fixture("User edited")
+        val draft = fixture("OCR draft")
+        var archive = ByteArray(0)
 
         try {
-            val archive = kotlinx.coroutines.runBlocking {
-                PassportExporter(cacheDir).createArchive(snapshot)
-            }
+            archive = kotlinx.coroutines.runBlocking { PassportExporter().createArchive(snapshot) }
+            assertTrue("Archive must be a 7z byte sequence", archive.size > 32)
+            assertEquals("Export must not create app files", 0, cacheDir.listFiles().orEmpty().size)
 
-            SevenZFile(archive, "123".toCharArray()).use { input ->
+            withArchive(archive, "123") { input ->
                 val entry = input.nextEntry
                 assertEquals("document.txt", entry.name)
                 val bytes = readEntry(input)
                 val exportedText = String(bytes, StandardCharsets.UTF_8)
+                bytes.fill(0)
                 assertEquals(PassportTextSerializer.serialize(snapshot), exportedText)
                 assertTrue(exportedText.contains("Серия: 0012\nНомер: 000345\n"))
                 assertFalse(exportedText.contains(draft.values.getValue(PassportField.SURNAME)))
                 assertEquals(null, input.nextEntry)
             }
 
-            val rejected = runCatching {
-                SevenZFile(archive, "wrong".toCharArray()).use { input ->
-                    input.nextEntry
-                    readEntry(input)
-                }
-            }
+            val rejected = runCatching { withArchive(archive, "wrong") { input -> input.nextEntry; readEntry(input) } }
             assertTrue("Archive must reject an incorrect password", rejected.isFailure)
         } finally {
+            archive.fill(0)
             cacheDir.deleteRecursively()
         }
     }
@@ -56,122 +54,78 @@ class PassportExporterTest {
 
         assertEquals(11, lines.size)
         assertEquals("Пол: МУЖ.", lines[3])
-        assertEquals(
-            PassportField.entries.map { field ->
-                val value = if (field == PassportField.GENDER) "МУЖ." else snapshot.values.getValue(field)
-                "${field.label}: $value"
-            },
-            lines,
-        )
+        assertEquals(PassportField.entries.map { field ->
+            val value = if (field == PassportField.GENDER) "МУЖ." else snapshot.values.getValue(field)
+            "${field.label}: $value"
+        }, lines)
     }
 
     @Test
     fun encryptedTextEntryExportsFemaleLabelWhileSnapshotKeepsCanonicalCode() {
-        val cacheDir = Files.createTempDirectory("passport-female-export-test").toFile()
-        val snapshot = fixture("value").let { base ->
-            PassportSnapshot(base.values + (PassportField.GENDER to "F"), base.revision)
-        }
-
+        val base = fixture("value")
+        val snapshot = PassportSnapshot(base.values + (PassportField.GENDER to "F"), base.revision)
+        val archive = kotlinx.coroutines.runBlocking { PassportExporter().createArchive(snapshot) }
         try {
-            val archive = kotlinx.coroutines.runBlocking { PassportExporter(cacheDir).createArchive(snapshot) }
-            SevenZFile(archive, "123".toCharArray()).use { input ->
+            withArchive(archive, "123") { input ->
                 assertEquals("document.txt", input.nextEntry.name)
-                val text = String(readEntry(input), StandardCharsets.UTF_8)
-                assertTrue(text.contains("Пол: ЖЕН.\n"))
-                assertFalse(text.contains("Пол: F\n"))
+                val bytes = readEntry(input)
+                try {
+                    val text = String(bytes, StandardCharsets.UTF_8)
+                    assertTrue(text.contains("Пол: ЖЕН.\n"))
+                    assertFalse(text.contains("Пол: F\n"))
+                } finally { bytes.fill(0) }
             }
             assertEquals("F", snapshot.values.getValue(PassportField.GENDER))
-        } finally {
-            cacheDir.deleteRecursively()
-        }
+        } finally { archive.fill(0) }
     }
 
     @Test
     fun refusesToExportCurrentValuesThatFailValidation() {
-        val cacheDir = Files.createTempDirectory("passport-invalid-export-test").toFile()
-        val invalidValues = fixture("ИВАНОВ").values.toMutableMap().apply {
-            put(PassportField.SERIES, "12")
-        }
-
-        try {
-            val failure = runCatching {
-                kotlinx.coroutines.runBlocking {
-                    PassportExporter(cacheDir).createArchive(PassportSnapshot(invalidValues, revision = 8))
-                }
-            }.exceptionOrNull()
-
-            assertTrue(failure is IllegalArgumentException)
-            assertTrue(PassportValidator.validate(invalidValues).isNotEmpty())
-            assertEquals(emptyList<File>(), cacheDir.listFiles()?.toList())
-        } finally {
-            cacheDir.deleteRecursively()
-        }
+        val invalidValues = fixture("ИВАНОВ").values.toMutableMap().apply { put(PassportField.SERIES, "12") }
+        val failure = runCatching {
+            kotlinx.coroutines.runBlocking { PassportExporter().createArchive(PassportSnapshot(invalidValues, revision = 8)) }
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(PassportValidator.validate(invalidValues).isNotEmpty())
     }
 
     @Test
-    fun writesSyntheticArchiveForIndependent7ZipVerification() {
-        val cacheDir = Files.createTempDirectory("passport-independent-7z-proof").toFile()
-        val snapshot = syntheticProofFixture()
-        val projectDir = File(System.getProperty("user.dir")).let { workingDir ->
-            if (File(workingDir, "app").isDirectory) workingDir else workingDir.parentFile
+    fun removesOnlyKnownLegacyExportStagingDirectories() {
+        val cacheDir = Files.createTempDirectory("passport-legacy-export-test").toFile()
+        val known = java.io.File(cacheDir, "exports/passport-export-old/document.7z").apply {
+            requireNotNull(parentFile).mkdirs()
+            writeBytes(byteArrayOf(1, 2, 3))
         }
-        val proofDirectory = File(projectDir, "build/verification")
-        val proofArchive = File(proofDirectory, "archive-proof.7z")
-        val expectedTextFile = File(proofDirectory, "archive-proof.expected.txt")
-
+        val unrelated = java.io.File(cacheDir, "exports/user-file.txt").apply { writeText("keep") }
         try {
-            val archive = kotlinx.coroutines.runBlocking {
-                PassportExporter(cacheDir).createArchive(snapshot)
-            }
-            check(proofDirectory.mkdirs() || proofDirectory.isDirectory)
-            Files.copy(archive.toPath(), proofArchive.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            expectedTextFile.writeText(EXPECTED_PROOF_TEXT, StandardCharsets.UTF_8)
-
-            SevenZFile(proofArchive, "123".toCharArray()).use { input ->
-                assertEquals("document.txt", input.nextEntry.name)
-                assertEquals(EXPECTED_PROOF_TEXT, String(readEntry(input), StandardCharsets.UTF_8))
-                assertEquals(null, input.nextEntry)
-            }
-        } finally {
-            cacheDir.deleteRecursively()
-        }
+            kotlinx.coroutines.runBlocking { PassportExporter().cleanupLegacyExportStaging(cacheDir) }
+            assertFalse(known.exists())
+            assertTrue(unrelated.isFile)
+            assertEquals("keep", unrelated.readText())
+        } finally { cacheDir.deleteRecursively() }
     }
 
-    private fun fixture(name: String): PassportSnapshot {
-        val values = PassportField.entries.associateWith { field ->
-            when (field) {
-                PassportField.SURNAME -> name
-                PassportField.GIVEN_NAME -> "АЛЕКСЕЙ"
-                PassportField.PATRONYMIC -> ""
-                PassportField.GENDER -> "M"
-                PassportField.BIRTH_DATE -> "1990-04-12"
-                PassportField.BIRTH_PLACE -> "ГОРОД ПРИМЕР"
-                PassportField.SERIES -> "0012"
-                PassportField.NUMBER -> "000345"
-                PassportField.ISSUE_DATE -> "2010-06-18"
-                PassportField.ISSUER -> "ОТДЕЛ ПРИМЕРА"
-                PassportField.DEPARTMENT_CODE -> "123-456"
-            }
-        }
-        return PassportSnapshot(values, revision = 7)
-    }
-
-    private fun syntheticProofFixture(): PassportSnapshot = PassportSnapshot(
-        mapOf(
-            PassportField.SURNAME to "СИНТЕТИЧЕСКИЙ",
-            PassportField.GIVEN_NAME to "ПРИМЕР",
-            PassportField.PATRONYMIC to "",
-            PassportField.GENDER to "F",
-            PassportField.BIRTH_DATE to "1999-12-31",
-            PassportField.BIRTH_PLACE to "ГОРОД ОБРАЗЕЦ",
-            PassportField.SERIES to "0042",
-            PassportField.NUMBER to "000007",
-            PassportField.ISSUE_DATE to "2020-01-02",
-            PassportField.ISSUER to "ТЕСТОВОЕ УЧРЕЖДЕНИЕ",
-            PassportField.DEPARTMENT_CODE to "123-456",
-        ),
-        revision = 42,
+    private fun fixture(name: String): PassportSnapshot = PassportSnapshot(
+        PassportField.entries.associateWith { field -> when (field) {
+            PassportField.SURNAME -> name
+            PassportField.GIVEN_NAME -> "АЛЕКСЕЙ"
+            PassportField.PATRONYMIC -> ""
+            PassportField.GENDER -> "M"
+            PassportField.BIRTH_DATE -> "1990-04-12"
+            PassportField.BIRTH_PLACE -> "ГОРОД ПРИМЕР"
+            PassportField.SERIES -> "0012"
+            PassportField.NUMBER -> "000345"
+            PassportField.ISSUE_DATE -> "2010-06-18"
+            PassportField.ISSUER -> "ОТДЕЛ ПРИМЕРА"
+            PassportField.DEPARTMENT_CODE -> "123-456"
+        } },
+        revision = 7,
     )
+
+    private fun withArchive(bytes: ByteArray, password: String, block: (SevenZFile) -> Unit) {
+        val channel = TestByteArrayChannel(bytes)
+        try { SevenZFile(channel, password.toCharArray()).use(block) } finally { channel.close() }
+    }
 
     private fun readEntry(input: SevenZFile): ByteArray = ByteArrayOutputStream().use { output ->
         val buffer = ByteArray(1024)
@@ -180,21 +134,27 @@ class PassportExporterTest {
             if (count < 0) break
             output.write(buffer, 0, count)
         }
+        buffer.fill(0)
         output.toByteArray()
     }
 
-    private companion object {
-        const val EXPECTED_PROOF_TEXT =
-            "Фамилия: СИНТЕТИЧЕСКИЙ\n" +
-                "Имя: ПРИМЕР\n" +
-                "Отчество: \n" +
-            "Пол: ЖЕН.\n" +
-                "Дата рождения: 1999-12-31\n" +
-                "Место рождения: ГОРОД ОБРАЗЕЦ\n" +
-                "Серия: 0042\n" +
-                "Номер: 000007\n" +
-                "Дата выдачи: 2020-01-02\n" +
-                "Кем выдан: ТЕСТОВОЕ УЧРЕЖДЕНИЕ\n" +
-                "Код подразделения: 123-456\n"
+    private class TestByteArrayChannel(private val source: ByteArray) : SeekableByteChannel {
+        private var cursor = 0
+        private var open = true
+        override fun read(dst: ByteBuffer): Int {
+            check(open)
+            if (cursor >= source.size) return -1
+            val count = minOf(dst.remaining(), source.size - cursor)
+            dst.put(source, cursor, count)
+            cursor += count
+            return count
+        }
+        override fun write(src: ByteBuffer): Int = error("read-only")
+        override fun position(): Long = cursor.toLong()
+        override fun position(newPosition: Long): SeekableByteChannel = apply { cursor = newPosition.toInt() }
+        override fun size(): Long = source.size.toLong()
+        override fun truncate(size: Long): SeekableByteChannel = error("read-only")
+        override fun isOpen(): Boolean = open
+        override fun close() { open = false }
     }
 }

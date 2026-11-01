@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -56,35 +57,59 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.passport.scanner.image.ScanImageFiles
+import ru.passport.scanner.data.AutomaticConnectionManager
+import ru.passport.scanner.data.ConnectionUiState
+import ru.passport.scanner.presentation.AsyncScanState
 import ru.passport.scanner.model.PassportField
 import ru.passport.scanner.presentation.ScanViewModel
-import java.io.File
 import java.util.concurrent.Executor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onOpenEmail: (File) -> Unit) {
+fun PassportScannerScreen(
+    viewModel: ScanViewModel,
+    isDemo: Boolean = false,
+    isLegacySync: Boolean = true,
+    connectionManager: AutomaticConnectionManager? = null,
+    serverAddressSuggestion: String = "",
+    httpsRequired: Boolean = false,
+    onConnectServer: (String) -> Unit = {},
+    onChangeServer: (String) -> Unit = {},
+    onOpenEmail: (ByteArray) -> Unit,
+) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val fallbackConnectionState = remember { androidx.compose.runtime.mutableStateOf<ConnectionUiState>(ConnectionUiState.NeedsServer) }
+    val connectionState by connectionManager?.state?.collectAsStateWithLifecycle() ?: fallbackConnectionState
     var cameraVisible by rememberSaveable { mutableStateOf(false) }
+    var connectionSheetVisible by rememberSaveable { mutableStateOf(false) }
+    var serverChangeConfirmation by remember { mutableStateOf<String?>(null) }
+    var discardConfirmation by remember { mutableStateOf(false) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var previewBitmap by remember(state.image?.id) { mutableStateOf<Bitmap?>(null) }
     var previewLoading by remember(state.image?.id) { mutableStateOf(state.image != null) }
     var selectionGeneration by remember { mutableLongStateOf(0L) }
     var pickerGeneration by remember { mutableLongStateOf(0L) }
     val coroutineScope = rememberCoroutineScope()
+    val connectionReady = isDemo || connectionManager == null || connectionState is ConnectionUiState.Ready
+    val currentServerUrl = when (connectionState) {
+        is ConnectionUiState.Ready -> (connectionState as ConnectionUiState.Ready).serverUrl
+        is ConnectionUiState.Connecting -> (connectionState as ConnectionUiState.Connecting).serverUrl
+        is ConnectionUiState.Unavailable -> (connectionState as ConnectionUiState.Unavailable).serverUrl
+        ConnectionUiState.NeedsServer, ConnectionUiState.StorageUnavailable -> null
+    }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
@@ -94,14 +119,9 @@ fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onO
             coroutineScope.launch {
                 val result = withContext(Dispatchers.IO) { runCatching { ScanImageFiles.copyFromPicker(context, uri) } }
                 val image = result.getOrNull()
-                if (image != null && requestGeneration != selectionGeneration) {
-                    withContext(Dispatchers.IO) { image.file.delete() }
-                    return@launch
-                }
+                if (image != null && requestGeneration != selectionGeneration) return@launch
                 if (image != null) {
-                    val oldFile = state.image?.file?.takeIf { it != image.file }
                     viewModel.pickImage(image)
-                    if (oldFile != null) launch(Dispatchers.IO) { oldFile.delete() }
                 } else if (requestGeneration == selectionGeneration) {
                     cameraError = result.exceptionOrNull()?.message ?: "Не удалось открыть изображение."
                 }
@@ -119,9 +139,9 @@ fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onO
     }
 
     LaunchedEffect(state.image?.id) {
-        val imageFile = state.image?.file
-        previewLoading = imageFile != null
-        previewBitmap = if (imageFile == null) null else withContext(Dispatchers.IO) { ScanImageFiles.decodePreview(imageFile) }
+        val selectedImage = state.image
+        previewLoading = selectedImage != null
+        previewBitmap = selectedImage?.preview
         previewLoading = false
     }
     LaunchedEffect(state.shareRequest?.id) {
@@ -142,31 +162,51 @@ fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onO
                 TopAppBar(
                     title = { Text("Сканер документов", fontWeight = FontWeight.SemiBold) },
                     actions = {
-                        if (state.image != null) TextButton(onClick = {
+                        if (!isDemo && connectionManager != null) TextButton(onClick = { connectionSheetVisible = true }) { Text("Сервер") }
+                        if (state.image != null || state.draft != null || state.asyncScan.blocksNewScan) TextButton(
+                            enabled = !state.asyncScan.blocksNewScan,
+                            onClick = {
                             selectionGeneration += 1
-                            val oldFile = state.image?.file
                             viewModel.newScan()
-                            if (oldFile != null) coroutineScope.launch(Dispatchers.IO) { oldFile.delete() }
                             cameraVisible = false
                         }) { Text("Новый снимок") }
                     },
                 )
                 if (isDemo) DemoModeBanner()
+                else if (connectionManager != null) ConnectionSummary(connectionState) { connectionSheetVisible = true }
             }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (!isDemo) {
+                AsyncJobStatusPanel(
+                    state = state,
+                    onRetry = viewModel::retry,
+                    onOpenServer = { connectionSheetVisible = true },
+                    onDiscard = { discardConfirmation = true },
+                )
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
+                    state.draft != null -> ReviewScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        viewModel = viewModel,
+                        isExporting = state.isExporting,
+                        error = state.error,
+                        onDismissError = viewModel::dismissError,
+                    )
+                    state.asyncScan.blocksNewScan && state.image == null -> WaitingForJobScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        enabled = connectionReady,
+                        onOpenServer = { connectionSheetVisible = true },
+                    )
                     cameraVisible -> CameraCaptureScreen(
                         modifier = Modifier.fillMaxSize(),
                         error = cameraError,
                         onBack = { selectionGeneration += 1; cameraVisible = false },
                         onCaptured = { image ->
                             selectionGeneration += 1
-                            val oldFile = state.image?.file?.takeIf { it != image.file }
                             viewModel.pickImage(image)
-                            if (oldFile != null) coroutineScope.launch(Dispatchers.IO) { oldFile.delete() }
                             cameraVisible = false
                             cameraError = null
                         },
@@ -175,34 +215,88 @@ fun PassportScannerScreen(viewModel: ScanViewModel, isDemo: Boolean = false, onO
                     state.image == null -> StartScreen(
                         modifier = Modifier.fillMaxSize(),
                         error = cameraError ?: state.error,
+                        enabled = !state.asyncScan.blocksNewScan,
                         onCamera = {
                             selectionGeneration += 1
                             cameraPermission.launch(Manifest.permission.CAMERA)
                         },
                         onGallery = ::openPicker,
                     )
-                    state.draft == null -> ImageReviewScreen(
+                    else -> ImageReviewScreen(
                         modifier = Modifier.fillMaxSize(),
                         bitmap = previewBitmap,
                         previewLoading = previewLoading,
                         isRecognizing = state.isRecognizing,
                         isDemo = isDemo,
-                        error = cameraError ?: state.error,
-                        onRecognize = viewModel::recognize,
+                        isLegacySync = isLegacySync,
+                        canSubmit = connectionReady && !state.asyncScan.blocksNewScan,
+                        canReplaceImage = !state.asyncScan.blocksNewScan,
+                        asyncPhase = state.asyncScan.phase,
+                        error = cameraError ?: state.error.takeIf { state.asyncScan.phase == AsyncScanState.Phase.IDLE },
+                        onRecognize = if (state.asyncScan.phase == AsyncScanState.Phase.FAILED) viewModel::retry else viewModel::recognize,
                         onRetry = viewModel::retry,
+                        onOpenServer = { connectionSheetVisible = true },
                         onGallery = ::openPicker,
-                        onDismissError = viewModel::dismissError,
-                    )
-                    else -> ReviewScreen(
-                        modifier = Modifier.fillMaxSize(),
-                        viewModel = viewModel,
-                        isExporting = state.isExporting,
-                        error = state.error,
                         onDismissError = viewModel::dismissError,
                     )
                 }
             }
         }
+    }
+
+    ConnectionSheet(
+        visible = connectionSheetVisible && !isDemo,
+        state = connectionState,
+        suggestedUrl = serverAddressSuggestion,
+        httpsRequired = httpsRequired,
+        busy = connectionState is ConnectionUiState.Connecting,
+        onDismiss = { connectionSheetVisible = false },
+        onSubmit = { url ->
+            val serverChanged = currentServerUrl != url
+            if (serverChanged && state.asyncScan.phase != AsyncScanState.Phase.IDLE) {
+                serverChangeConfirmation = url
+            } else {
+                connectionSheetVisible = false
+                if (serverChanged) {
+                    onChangeServer(url)
+                } else {
+                    onConnectServer(url)
+                }
+            }
+        },
+    )
+
+    serverChangeConfirmation?.let { url ->
+        AlertDialog(
+            onDismissRequest = { serverChangeConfirmation = null },
+            title = { Text("Сменить сервер?") },
+            text = {
+                Text("Приложение перестанет отслеживать задание на этом устройстве. Задание на сервере не отменяется и может продолжить выполняться.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    serverChangeConfirmation = null
+                    connectionSheetVisible = false
+                    onChangeServer(url)
+                }) { Text("Остановить отслеживание и сменить") }
+            },
+            dismissButton = { TextButton(onClick = { serverChangeConfirmation = null }) { Text("Оставить") } },
+        )
+    }
+
+    if (discardConfirmation) {
+        AlertDialog(
+            onDismissRequest = { discardConfirmation = false },
+            title = { Text("Остановить отслеживание?") },
+            text = { Text("Приложение забудет это задание в текущем сеансе. Серверное задание не отменяется.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    discardConfirmation = false
+                    viewModel.abandonPendingOperation()
+                }) { Text("Удалить на устройстве") }
+            },
+            dismissButton = { TextButton(onClick = { discardConfirmation = false }) { Text("Оставить") } },
+        )
     }
 }
 
@@ -220,7 +314,7 @@ private fun DemoModeBanner() {
 }
 
 @Composable
-private fun StartScreen(modifier: Modifier, error: String?, onCamera: () -> Unit, onGallery: () -> Unit) {
+private fun StartScreen(modifier: Modifier, error: String?, enabled: Boolean = true, onCamera: () -> Unit, onGallery: () -> Unit) {
     Column(
         modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.Center,
@@ -234,9 +328,9 @@ private fun StartScreen(modifier: Modifier, error: String?, onCamera: () -> Unit
         Spacer(Modifier.height(8.dp))
         Text("Снимите разворот или выберите готовое фото. Перед отправкой можно проверить и исправить каждое поле.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(26.dp))
-        Button(onClick = onCamera, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Снять фото") }
+        Button(onClick = onCamera, enabled = enabled, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Снять фото") }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Выбрать из галереи") }
+        OutlinedButton(onClick = onGallery, enabled = enabled, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Выбрать из галереи") }
         error?.let { ErrorCard(it) }
         Spacer(Modifier.height(16.dp))
         Text("Распознавание создаёт черновик, который можно отредактировать.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -250,9 +344,14 @@ private fun ImageReviewScreen(
     previewLoading: Boolean,
     isRecognizing: Boolean,
     isDemo: Boolean,
+    isLegacySync: Boolean,
+    canSubmit: Boolean,
+    canReplaceImage: Boolean,
+    asyncPhase: AsyncScanState.Phase,
     error: String?,
     onRecognize: () -> Unit,
     onRetry: () -> Unit,
+    onOpenServer: () -> Unit,
     onGallery: () -> Unit,
     onDismissError: () -> Unit,
 ) {
@@ -267,13 +366,87 @@ private fun ImageReviewScreen(
             }
         }
         error?.let { ErrorCard(it, onDismissError) }
-        Button(onClick = onRecognize, enabled = !isRecognizing, modifier = Modifier.fillMaxWidth().height(54.dp)) {
+        Button(
+            onClick = if (!canSubmit) onOpenServer else onRecognize,
+            enabled = !isRecognizing,
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+        ) {
             if (isRecognizing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            else Text(if (isDemo) "Получить тестовые данные" else "Распознать")
+            else Text(when {
+                !canSubmit -> "Подключить сервер"
+                asyncPhase == AsyncScanState.Phase.FAILED -> "Новая попытка"
+                isDemo -> "Получить тестовые данные"
+                isLegacySync -> "Распознать"
+                else -> "Отправить на распознавание"
+            })
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(onClick = onGallery, enabled = !isRecognizing) { Text("Выбрать другое фото") }
+            TextButton(onClick = onGallery, enabled = canReplaceImage && !isRecognizing) { Text("Выбрать другое фото") }
             if (error != null) TextButton(onClick = onRetry, enabled = !isRecognizing) { Text("Повторить") }
+        }
+    }
+}
+
+@Composable
+private fun AsyncJobStatusPanel(
+    state: ru.passport.scanner.presentation.ScanUiState,
+    onRetry: () -> Unit,
+    onOpenServer: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    val phase = state.asyncScan.phase
+    if (phase == AsyncScanState.Phase.IDLE || phase == AsyncScanState.Phase.COMPLETED) return
+    val title = when (phase) {
+        AsyncScanState.Phase.SUBMITTING -> "Отправка снимка"
+        AsyncScanState.Phase.QUEUED -> "В очереди"
+        AsyncScanState.Phase.PROCESSING -> "Распознавание"
+        AsyncScanState.Phase.FAILED -> "Не удалось распознать"
+        AsyncScanState.Phase.CONNECTION_REQUIRED -> "Нужно восстановить подключение"
+        AsyncScanState.Phase.RECOVERY_REQUIRED -> "Не удалось продолжить задание"
+        AsyncScanState.Phase.IDLE, AsyncScanState.Phase.COMPLETED -> return
+    }
+    val active = state.asyncScan.isActive
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
+            val message = state.asyncScan.message ?: state.error
+            if (!message.isNullOrBlank()) Text(message, style = MaterialTheme.typography.bodySmall)
+            when (phase) {
+                AsyncScanState.Phase.FAILED -> if (state.image != null) TextButton(onClick = onRetry) { Text("Новая попытка") }
+                AsyncScanState.Phase.CONNECTION_REQUIRED -> TextButton(onClick = onOpenServer) { Text("Проверить подключение") }
+                AsyncScanState.Phase.RECOVERY_REQUIRED -> Row {
+                    TextButton(onClick = onRetry) { Text("Продолжить") }
+                    TextButton(onClick = onOpenServer) { Text("Сервер") }
+                }
+                AsyncScanState.Phase.SUBMITTING -> if (!active) TextButton(onClick = onRetry) { Text("Проверить отправку") }
+                else -> Unit
+            }
+            if (state.asyncScan.blocksNewScan) {
+                TextButton(onClick = onDiscard) { Text("Остановить отслеживание") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WaitingForJobScreen(modifier: Modifier, enabled: Boolean, onOpenServer: () -> Unit) {
+    Column(
+        modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Ожидание результата", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        Text("Новое задание можно отправить после завершения текущего.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!enabled) {
+            Spacer(Modifier.height(14.dp))
+            TextButton(onClick = onOpenServer) { Text("Проверить подключение") }
         }
     }
 }
@@ -408,19 +581,35 @@ private fun CameraCaptureScreen(modifier: Modifier, error: String?, onBack: () -
                 if (busy) return@Button
                 busy = true
                 coroutineScope.launch {
-                    val file = withContext(Dispatchers.IO) { ScanImageFiles.newCameraFile(context) }
-                    imageCapture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), mainExecutor, object : ImageCapture.OnImageSavedCallback {
-                        override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    imageCapture.takePicture(mainExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                        override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
                             busy = false
+                            val rotation = image.imageInfo.rotationDegrees
+                            val jpeg = try {
+                                val buffer = image.planes.firstOrNull()?.buffer?.duplicate()
+                                    ?: error("Снимок недоступен.")
+                                ByteArray(buffer.remaining()).also(buffer::get)
+                            } catch (_: Exception) {
+                                onError("Не удалось подготовить снимок.")
+                                return
+                            } finally {
+                                image.close()
+                            }
                             coroutineScope.launch {
-                                val result = withContext(Dispatchers.IO) { runCatching { ScanImageFiles.cameraImage(file) } }
+                                val result = withContext(Dispatchers.Default) { runCatching {
+                                    ScanImageFiles.createImage(
+                                        id = java.util.UUID.randomUUID().toString(),
+                                        source = jpeg,
+                                        sourceMime = "image/jpeg",
+                                        rotationDegrees = rotation,
+                                    )
+                                } }
                                 result.onSuccess(onCaptured)
-                                    .onFailure { coroutineScope.launch(Dispatchers.IO) { file.delete() }; onError(it.message ?: "Не удалось сохранить снимок.") }
+                                    .onFailure { onError(it.message ?: "Не удалось подготовить снимок.") }
                             }
                         }
                         override fun onError(exception: ImageCaptureException) {
                             busy = false
-                            coroutineScope.launch(Dispatchers.IO) { file.delete() }
                             onError("Не удалось сделать снимок. Попробуйте ещё раз.")
                         }
                     })
@@ -452,7 +641,11 @@ private fun CameraPreview(
                 provider = providerFuture.get()
                 val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
                 val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
-                val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).setTargetRotation(rotation).build()
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG)
+                    .setTargetRotation(rotation)
+                    .build()
                 provider?.unbindAll()
                 provider?.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
                 onCaptureReady(capture)

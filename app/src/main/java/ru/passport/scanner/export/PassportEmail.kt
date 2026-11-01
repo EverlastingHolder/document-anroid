@@ -7,8 +7,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.net.Uri
-import androidx.core.content.FileProvider
-import java.io.File
 
 /** Prepares a draft for an email app; the user reviews and sends it manually. */
 object PassportEmail {
@@ -18,19 +16,21 @@ object PassportEmail {
     /**
      * Creates an email-only chooser. Apps must support both `mailto:` composition and
      * sharing this 7z attachment; generic share targets are deliberately excluded.
-     * The archive remains in cache if no compatible email app is installed.
+     * The caller removes the staged archive if no compatible email app is installed.
      */
-    fun createChooserIntent(context: Context, archive: File): Intent =
-        createChooserIntent(context, archive) { query ->
+    fun createChooserIntent(context: Context, archiveUri: Uri): Intent =
+        createChooserIntent(context, archiveUri) { query ->
             context.packageManager.queryIntentActivities(query, PackageManager.MATCH_DEFAULT_ONLY)
         }
 
     internal fun createChooserIntent(
         context: Context,
-        archive: File,
+        archiveUri: Uri,
         queryActivities: (Intent) -> List<ResolveInfo>,
     ): Intent {
-        require(archive.isFile) { "Archive does not exist" }
+        require(archiveUri.scheme == "content" && archiveUri.authority == "${context.packageName}.exports") {
+            "Archive URI is invalid"
+        }
         val mailPackages = queryActivities(
             Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")),
         ).mapNotNull { it.activityInfo?.packageName }.toSet()
@@ -45,19 +45,14 @@ object PassportEmail {
 
         if (compatibleSendTargets.isEmpty()) throw NoEmailHandlerException()
 
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            archive,
-        )
         fun targetedSendIntent(component: ComponentName) = Intent(Intent.ACTION_SEND).apply {
             this.component = component
             type = ARCHIVE_MIME_TYPE
             putExtra(Intent.EXTRA_EMAIL, arrayOf(RECIPIENT))
             putExtra(Intent.EXTRA_SUBJECT, "Данные документа")
             putExtra(Intent.EXTRA_TEXT, "Во вложении архив с подтверждёнными данными.")
-            putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newUri(context.contentResolver, "Архив документа", uri)
+            putExtra(Intent.EXTRA_STREAM, archiveUri)
+            clipData = ClipData.newUri(context.contentResolver, "Архив документа", archiveUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -69,12 +64,12 @@ object PassportEmail {
             compatibleSendTargets.drop(1).map(::targetedSendIntent).toTypedArray(),
         )
         // Keep the read grant on the chooser as well as its explicit target intents.
-        chooser.clipData = ClipData.newUri(context.contentResolver, "Архив документа", uri)
+        chooser.clipData = ClipData.newUri(context.contentResolver, "Архив документа", archiveUri)
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         return chooser
     }
 
     class NoEmailHandlerException : IllegalStateException(
-        "No installed email app can attach this archive. The archive is still saved; install an email app and retry.",
+        "No installed email app can attach this archive.",
     )
 }

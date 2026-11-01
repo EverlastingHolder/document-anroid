@@ -9,19 +9,29 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import ru.passport.scanner.data.ApiConnection
 
 @RunWith(AndroidJUnit4::class)
 class NetworkSecurityConfigurationTest {
     @Test
-    fun cleartextIsAllowedOnlyForConfiguredHttpHost() {
+    fun debugCleartextPolicyWorksWithAppLevelPrivateHostValidation() {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
         assertEquals(BuildConfig.APPLICATION_ID, targetContext.packageName)
 
         val policy = NetworkSecurityPolicy.getInstance()
-        val unconfiguredHost = "not-configured.invalid"
-        assertFalse(
-            "Cleartext must stay disabled for hosts outside the configured API host.",
-            policy.isCleartextTrafficPermitted(unconfiguredHost),
+        val otherPrivateHost = "192.168.1.77"
+        assertTrue("Debug permits configured local HTTP addresses.", policy.isCleartextTrafficPermitted(otherPrivateHost))
+        assertTrue("Loopback HTTP is available to local fixture tests.", policy.isCleartextTrafficPermitted("127.0.0.1"))
+        assertTrue(
+            "The app must reject public HTTP hosts even though debug Network Security allows cleartext sockets.",
+            runCatching {
+                ApiConnection(
+                    "http://not-configured.invalid",
+                    "pbt1_" + "A".repeat(43),
+                    "invalid-public-host",
+                    allowDebugLocalHttp = true,
+                )
+            }.isFailure,
         )
 
         val configuredUrl = BuildConfig.OCR_BASE_URL

@@ -16,30 +16,17 @@ plugins {
 
 abstract class GenerateNetworkSecurityConfig : DefaultTask() {
     @get:Input
-    abstract val httpHost: Property<String>
+    abstract val allowDebugLoopback: Property<Boolean>
 
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
 
     @TaskAction
     fun generate() {
-        val host = httpHost.get().takeIf(String::isNotBlank)?.let { value ->
-            value
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;")
-        }
         val config = buildString {
             appendLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>")
             appendLine("<network-security-config>")
-            appendLine("    <base-config cleartextTrafficPermitted=\"false\" />")
-            if (host != null) {
-                appendLine("    <domain-config cleartextTrafficPermitted=\"true\">")
-                appendLine("        <domain includeSubdomains=\"false\">$host</domain>")
-                appendLine("    </domain-config>")
-            }
+            appendLine("    <base-config cleartextTrafficPermitted=\"${allowDebugLoopback.get()}\" />")
             appendLine("</network-security-config>")
         }
         val output = outputDirectory.file("xml/network_security_config.xml").get().asFile
@@ -52,7 +39,7 @@ val ocrBaseUrl = providers.gradleProperty("OCR_BASE_URL")
     .orElse("http://192.168.1.91:8080")
     .get()
     .trim()
-val ocrUseStub = providers.gradleProperty("OCR_USE_STUB").orElse(ocrBaseUrl.isBlank().toString()).get().toBooleanStrictOrNull()
+val ocrUseStub = providers.gradleProperty("OCR_USE_STUB").orElse("false").get().toBooleanStrictOrNull()
     ?: throw GradleException("OCR_USE_STUB must be exactly 'true' or 'false'.")
 
 fun buildConfigString(value: String): String =
@@ -73,18 +60,18 @@ val ocrBaseUri = ocrBaseUrl.takeIf(String::isNotBlank)?.let { value ->
     uri
 }
 
+val releaseBaseUrl = ocrBaseUri
+    ?.takeIf { it.scheme.equals("https", ignoreCase = true) }
+    ?.toString()
+    .orEmpty()
+
 val generateNetworkSecurityConfig = tasks.register("generateNetworkSecurityConfig")
 
 androidComponents.onVariants { variant ->
     val variantTask = tasks.register<GenerateNetworkSecurityConfig>(
         "generate${variant.name.replaceFirstChar { it.uppercaseChar() }}NetworkSecurityConfig",
     ) {
-        httpHost.set(
-            ocrBaseUri
-                ?.takeIf { it.scheme.equals("http", ignoreCase = true) }
-                ?.host
-                .orEmpty(),
-        )
+        allowDebugLoopback.set(variant.buildType == "debug")
     }
     variant.sources.res?.addGeneratedSourceDirectory(
         variantTask,
@@ -116,7 +103,8 @@ android {
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "OCR_BASE_URL", buildConfigString(ocrBaseUrl))
+            buildConfigField("String", "OCR_BASE_URL", buildConfigString(releaseBaseUrl))
+            buildConfigField("boolean", "OCR_USE_STUB", "false")
         }
     }
 

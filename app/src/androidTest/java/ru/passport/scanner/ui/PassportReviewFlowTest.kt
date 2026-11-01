@@ -15,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -39,8 +40,8 @@ class PassportReviewFlowTest {
     @Test
     fun editedValuesExportImmediatelyAndUiHasNoPerFieldReviewOrConfirmControls() {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
-        val archive = File(context.cacheDir, "ui-test.7z")
-        val openedArchive = AtomicReference<File?>()
+        val archive = byteArrayOf(7, 8, 9)
+        val openedArchive = AtomicReference<ByteArray?>()
         val vm = ScanViewModel(
             repository = object : PassportRepository {
                 override suspend fun recognize(image: ScanImage, requestId: String) = sampleDraft()
@@ -48,7 +49,6 @@ class PassportReviewFlowTest {
             createArchive = { snapshot: PassportSnapshot ->
                 assertEquals("ПЕТРОВ", snapshot.values.getValue(PassportField.SURNAME))
                 assertEquals("F", snapshot.values.getValue(PassportField.GENDER))
-                archive.writeBytes(byteArrayOf(1))
                 archive
             },
         )
@@ -65,6 +65,7 @@ class PassportReviewFlowTest {
         }
 
         compose.onNodeWithTag("field_surname").performTextReplacement("ПЕТРОВ")
+        compose.onNodeWithTag("review_list").performScrollToNode(hasTestTag("gender_M"))
         compose.onNodeWithText("МУЖ.").assertIsDisplayed()
         compose.onNodeWithText("ЖЕН.").assertIsDisplayed()
         compose.onNodeWithTag("gender_F").assertIsDisplayed().performClick()
@@ -76,7 +77,7 @@ class PassportReviewFlowTest {
         compose.onNodeWithText("Создать архив и открыть почту").assertExists().performClick()
 
         compose.waitUntil(timeoutMillis = 5_000) { openedArchive.get() != null }
-        assertEquals(archive, openedArchive.get())
+        assertArrayEquals(archive, openedArchive.get())
     }
 
     @Test
@@ -87,7 +88,7 @@ class PassportReviewFlowTest {
             repository = object : PassportRepository {
                 override suspend fun recognize(image: ScanImage, requestId: String) = sampleDraft()
             },
-            createArchive = { archiveCalls++; File(context.cacheDir, "invalid.7z") },
+            createArchive = { archiveCalls++; byteArrayOf(1) },
         )
         vm.pickImage(ScanImage("invalid-ui", File(context.cacheDir, "unused.jpg"), "image/jpeg"))
         compose.setContent { MaterialTheme { PassportScannerScreen(vm) { } } }
@@ -137,10 +138,10 @@ class PassportReviewFlowTest {
     @Test
     fun demoModeShowsLocalDataNoticeAndUsesRealExportFlow() {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
-        val openedArchive = AtomicReference<File?>()
+        val openedArchive = AtomicReference<ByteArray?>()
         val vm = ScanViewModel(
             repository = DemoPassportRepository(),
-            createArchive = PassportExporter(context.cacheDir)::createArchive,
+            createArchive = PassportExporter()::createArchive,
         )
         vm.pickImage(ScanImage("demo-ui-test", File(context.cacheDir, "demo-image-not-read.jpg"), "image/jpeg"))
 
@@ -165,12 +166,8 @@ class PassportReviewFlowTest {
 
         compose.waitUntil(timeoutMillis = 10_000) { openedArchive.get() != null }
         val archive = requireNotNull(openedArchive.get())
-        try {
-            assertTrue(archive.isFile)
-            assertTrue(archive.length() > 0L)
-        } finally {
-            archive.parentFile?.deleteRecursively()
-        }
+        assertTrue(archive.isNotEmpty())
+        archive.fill(0)
     }
 
     private fun sampleDraft(): PassportDraft = PassportDraft(
